@@ -24,7 +24,12 @@ export default function App() {
 
     localStorage.setItem("unity_ip", ip);
 
-    const ws = new WebSocket(`ws://${ip}:8080`);
+    // Use current domain in production, custom IP in development
+    const wsUrl = ip === "localhost" || ip === "127.0.0.1" || window.location.hostname === "localhost"
+      ? `ws://${ip}:8080`
+      : `wss://${window.location.host}`;
+
+    const ws = new WebSocket(wsUrl);
 
     socket.current = ws;
 
