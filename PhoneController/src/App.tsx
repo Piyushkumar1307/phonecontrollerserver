@@ -3,164 +3,90 @@ import { useEffect, useRef, useState } from "react";
 export default function App() {
   const socket = useRef<WebSocket | null>(null);
 
-  const [ip, setIp] = useState(
-    localStorage.getItem("unity_ip") || "192.168.31.236"
-  );
-
   const [connected, setConnected] = useState(false);
+  const [sensorEnabled, setSensorEnabled] = useState(false);
 
-  const [connecting, setConnecting] = useState(false);
+  useEffect(() => {
+    socket.current = new WebSocket("wss://phonecontrollerserver.onrender.com");
 
-  const timer = useRef<number | null>(null);
-
-  function connect()
-  {
-    if(socket.current)
-    {
-      socket.current.close();
-    }
-
-    setConnecting(true);
-
-    localStorage.setItem("unity_ip", ip);
-
-    // Use current domain in production, custom IP in development
-    const wsUrl = ip === "localhost" || ip === "127.0.0.1" || window.location.hostname === "localhost"
-      ? `ws://${ip}:8080`
-      : `wss://${window.location.host}`;
-
-    const ws = new WebSocket(wsUrl);
-
-    socket.current = ws;
-
-    ws.onopen = () =>
-    {
+    socket.current.onopen = () => {
       console.log("Connected");
       setConnected(true);
-      setConnecting(false);
     };
 
-    ws.onclose = () =>
-    {
-      console.log("Disconnected");
+    socket.current.onclose = () => {
       setConnected(false);
-      setConnecting(false);
     };
 
-    ws.onerror = () =>
-    {
-      console.log("Connection Failed");
-      setConnected(false);
-      setConnecting(false);
-    };
-  }
+    return () => socket.current?.close();
+  }, []);
 
-  function startMove(dir:number)
-  {
-    if(!connected) return;
+  async function enableMotion() {
+    try {
+      // iPhone requires permission
+      if (
+        typeof DeviceOrientationEvent !== "undefined" &&
+        typeof (DeviceOrientationEvent as any).requestPermission === "function"
+      ) {
+        const permission = await (DeviceOrientationEvent as any).requestPermission();
 
-    socket.current?.send(JSON.stringify({
-      move:dir
-    }));
+        if (permission !== "granted") {
+          alert("Motion permission denied");
+          return;
+        }
+      }
 
-    timer.current = window.setInterval(()=>{
-      socket.current?.send(JSON.stringify({
-        move:dir
-      }));
-    },30);
-  }
+      window.addEventListener("deviceorientation", handleOrientation);
 
-  function stopMove()
-  {
-    if(timer.current)
-    {
-      clearInterval(timer.current);
-      timer.current=null;
+      setSensorEnabled(true);
+
+      console.log("Gyroscope Started");
+    } catch (e) {
+      console.error(e);
     }
-
-    socket.current?.send(JSON.stringify({
-      move:0
-    }));
   }
 
-  useEffect(()=>{
-    return ()=>{
-      socket.current?.close();
-    };
-  },[]);
+  function handleOrientation(event: DeviceOrientationEvent) {
+    if (event.gamma == null) return;
+
+    let move = event.gamma / 45;
+
+    move = Math.max(-1, Math.min(1, move));
+
+    socket.current?.send(
+      JSON.stringify({
+        move,
+      })
+    );
+
+    console.log(
+      `Gamma : ${event.gamma.toFixed(1)}  Move : ${move.toFixed(2)}`
+    );
+  }
 
   return (
     <div
       style={{
-        display:"flex",
-        flexDirection:"column",
-        alignItems:"center",
-        gap:"20px",
-        marginTop:"40px"
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        marginTop: 60,
+        gap: 30,
       }}
     >
-      <h1>📱 Phone Controller</h1>
+      <h1>📱 Phone Steering Wheel</h1>
 
-      <input
-        type="text"
-        placeholder="192.168.31.236"
-        value={ip}
-        onChange={(e)=>setIp(e.target.value)}
-        style={{
-          width:260,
-          height:45,
-          fontSize:20,
-          textAlign:"center"
-        }}
-      />
-
-      <button
-        onClick={connect}
-        style={{
-          width:180,
-          height:45,
-          fontSize:18
-        }}
-      >
-        Connect
-      </button>
-
-      <h2>
-        {connecting
-          ? "Connecting..."
-          : connected
-          ? "🟢 Connected"
-          : "🔴 Disconnected"}
-      </h2>
+      <h2>{connected ? "🟢 Connected" : "🔴 Disconnected"}</h2>
 
       <button
         style={{
-          width:250,
-          height:100,
-          fontSize:35
+          width: 250,
+          height: 70,
+          fontSize: 24,
         }}
-        onMouseDown={()=>startMove(-1)}
-        onMouseUp={stopMove}
-        onTouchStart={()=>startMove(-1)}
-        onTouchEnd={stopMove}
-        onTouchCancel={stopMove}
+        onClick={enableMotion}
       >
-        ⬅ LEFT
-      </button>
-
-      <button
-        style={{
-          width:250,
-          height:100,
-          fontSize:35
-        }}
-        onMouseDown={()=>startMove(1)}
-        onMouseUp={stopMove}
-        onTouchStart={()=>startMove(1)}
-        onTouchEnd={stopMove}
-        onTouchCancel={stopMove}
-      >
-        RIGHT ➡
+        {sensorEnabled ? "Gyroscope Enabled" : "Enable Gyroscope"}
       </button>
     </div>
   );
