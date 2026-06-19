@@ -9,30 +9,54 @@ export default function App() {
   const [calibrating, setCalibrating] = useState(false);
   const [calibrated, setCalibrated] = useState(false);
 
-  // ===== Calibration =====
-  const baselineYaw = useRef(0);
+  const baselineGamma = useRef(0);
   const samples = useRef<number[]>([]);
   const collecting = useRef(false);
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+  const requestWakeLockRef = useRef<() => Promise<void>>(async () => {});
 
-  // ===== Smoothing =====
-  const smoothedValue = useRef(0);
-  const SMOOTHING = 0.15; // lower = smoother
+  useEffect(() => {
+    async function requestWakeLock() {
+      if (!("wakeLock" in navigator)) return;
 
-  // ===== Dead zone =====
-  const DEAD_ZONE = 0.08;
+      try {
+        wakeLockRef.current = await navigator.wakeLock.request("screen");
+      } catch (err) {
+        console.warn("Wake lock request failed:", err);
+      }
+    }
+
+    requestWakeLockRef.current = requestWakeLock;
+    requestWakeLock();
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        requestWakeLock();
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      wakeLockRef.current?.release();
+    };
+  }, []);
 
   useEffect(() => {
     socket.current = new WebSocket("wss://phonecontrollerserver.onrender.com");
 
-    socket.current.onopen = () => setConnected(true);
-    socket.current.onclose = () => setConnected(false);
+    socket.current.onopen = () => {
+      setConnected(true);
+    };
+
+    socket.current.onclose = () => {
+      setConnected(false);
+    };
 
     return () => socket.current?.close();
   }, []);
 
-  // =========================
-  // CALIBRATION
-  // =========================
   function startCalibration() {
     setCalibrating(true);
     setCalibrated(false);
@@ -40,6 +64,7 @@ export default function App() {
     samples.current = [];
     collecting.current = true;
 
+    // Collect data for 2 seconds
     setTimeout(() => {
       collecting.current = false;
 
@@ -48,29 +73,25 @@ export default function App() {
           samples.current.reduce((a, b) => a + b, 0) /
           samples.current.length;
 
-        baselineYaw.current = avg;
+        baselineGamma.current = avg;
       } else {
-        baselineYaw.current = 0;
+        baselineGamma.current = 0;
       }
 
       setCalibrating(false);
       setCalibrated(true);
 
-      console.log("Calibration Done:", baselineYaw.current);
+      console.log("Calibration Done. Baseline:", baselineGamma.current);
     }, 2000);
   }
 
-  // =========================
-  // ENABLE SENSOR
-  // =========================
   async function enableMotion() {
     try {
       if (
         typeof DeviceOrientationEvent !== "undefined" &&
         typeof (DeviceOrientationEvent as any).requestPermission === "function"
       ) {
-        const permission =
-          await (DeviceOrientationEvent as any).requestPermission();
+        const permission = await (DeviceOrientationEvent as any).requestPermission();
 
         if (permission !== "granted") {
           alert("Motion permission denied");
@@ -80,63 +101,40 @@ export default function App() {
 
       window.addEventListener("deviceorientation", handleOrientation);
 
+      // Re-request wake lock after user gesture (required on some mobile browsers)
+      await requestWakeLockRef.current();
+
       setSensorEnabled(true);
+
+      // 🔥 Start auto calibration immediately
       startCalibration();
     } catch (e) {
       console.error(e);
     }
   }
 
-  // =========================
-  // CORE SENSOR LOGIC
-  // =========================
   function handleOrientation(event: DeviceOrientationEvent) {
-    if (event.alpha == null) return;
+    if (event.gamma == null) return;
 
-    const rawYaw = event.alpha;
-
-    // 1. calibration sample collection
+    // collect samples during calibration
     if (collecting.current) {
-      samples.current.push(rawYaw);
+      samples.current.push(event.gamma);
     }
 
-    // 2. normalize relative to baseline
-    let value = rawYaw - baselineYaw.current;
+    // normalize using baseline
+    let move = (event.gamma - baselineGamma.current) / 45;
 
-    // wrap-around fix (0–360 jump issue)
-    if (value > 180) value -= 360;
-    if (value < -180) value += 360;
+    move = Math.max(-1, Math.min(1, move));
 
-    // scale to -1 to 1
-    value = value / 45;
-
-    // 3. dead zone (remove tiny drift)
-    if (Math.abs(value) < DEAD_ZONE) value = 0;
-
-    // 4. smoothing (low-pass filter)
-    smoothedValue.current =
-      smoothedValue.current +
-      SMOOTHING * (value - smoothedValue.current);
-
-    const move = Math.max(-1, Math.min(1, smoothedValue.current));
-
-    // send to server
-    socket.current?.send(
-      JSON.stringify({
-        move,
-      })
-    );
+    socket.current?.send(JSON.stringify({ move }));
 
     console.log(
-      `Yaw: ${rawYaw.toFixed(1)} | Move: ${move.toFixed(2)}`
+      `Gamma: ${event.gamma.toFixed(1)} | Move: ${move.toFixed(2)}`
     );
   }
 
-  // =========================
-  // UI
-  // =========================
   const statusText = calibrating
-    ? "🧠 Auto calibration... hold phone still"
+    ? "🧠 Auto calibration in progress... hold your phone still"
     : calibrated
     ? "✅ Calibration done"
     : "Idle";
@@ -152,10 +150,11 @@ export default function App() {
         fontFamily: "sans-serif",
       }}
     >
-      <h1>📱 Phone Steering Wheel (Pro)</h1>
+      <h1>📱 Phone Steering Wheel</h1>
 
       <h2>{connected ? "🟢 Connected" : "🔴 Disconnected"}</h2>
 
+      {/* 🔥 Calibration Status */}
       <div
         style={{
           padding: "10px 20px",
@@ -165,7 +164,9 @@ export default function App() {
             : calibrated
             ? "#d4edda"
             : "#f0f0f0",
+          color: "#000",
           fontWeight: "bold",
+          transition: "0.3s",
         }}
       >
         {statusText}
@@ -173,9 +174,10 @@ export default function App() {
 
       <button
         style={{
-          width: 260,
+          width: 250,
           height: 70,
-          fontSize: 18,
+          fontSize: 20,
+          cursor: "pointer",
         }}
         onClick={enableMotion}
         disabled={sensorEnabled && calibrating}
